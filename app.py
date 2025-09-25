@@ -297,7 +297,7 @@ with cols[1]:
         st.rerun()
 
 st.header("Live Call Dashboard")
-st.subheader(f"Live Co-Pilot Feed (Updated every {CHUNK_DURATION}s)")
+st.subheader(f"Live Co-Pilot Feed")
 st.text_area("Live Feed", value=st.session_state.live_chunks_display, height=300, key="live_feed")
 st.header("Post-Call Analysis")
 st.subheader("Products Recommended During Call")
@@ -309,7 +309,7 @@ else:
 st.subheader("Final Call Summary")
 sentiment_color = {"Positive": "inverse", "Negative": "off"}.get(st.session_state.final_sentiment_display, "normal")
 st.metric("Overall Sentiment", st.session_state.final_sentiment_display, delta_color=sentiment_color)
-st.info(f"**AI Generated Summary:**\n\n{st.session_state.final_summary}")
+st.info(f"**Overall Summary:**\n\n{st.session_state.final_summary}")
 
 if st.session_state.is_running:
     try:
