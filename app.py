@@ -40,7 +40,7 @@ if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         generation_config = genai.GenerationConfig(response_mime_type="application/json")
-        gemini_client = genai.GenerativeModel('gemini-1.5-flash-latest', generation_config=generation_config)
+        gemini_client = genai.GenerativeModel('models/gemini-flash-latest', generation_config=generation_config)
         st.session_state.active_llm = "Gemini Pro"
     except Exception as e:
         st.warning(f"Failed to initialize Gemini client: {e}.")
@@ -172,7 +172,7 @@ def perform_final_analysis_and_log(sheet_to_log, customer_profile, full_transcri
         st.session_state.final_summary = "No speech was detected to summarize."
         st.session_state.final_sentiment_display = "Neutral"
         return
-    text_generator = genai.GenerativeModel('gemini-1.5-flash-latest')
+    text_generator = genai.GenerativeModel('models/gemini-flash-latest')
     prompt = f"""
     You are an expert sales analyst. Provide a comprehensive, post-call summary.
     **CUSTOMER PROFILE:** {json.dumps(customer_profile, indent=2)}
