@@ -15,6 +15,8 @@ from oauth2client.service_account import ServiceAccountCredentials
 import time
 import google.generativeai as genai
 import json
+import io
+
 
 # --- CONFIGURATION & CLIENT INITIALIZATION ---
 load_dotenv()
@@ -22,6 +24,7 @@ st.set_page_config(layout="wide", page_title="AI Sales Co-Pilot")
 
 # --- CORE SETTINGS ---
 CHUNK_DURATION = 10
+OVERLAP_DURATION = 1 #change 
 SAMPLE_RATE = 16000
 CHANNELS = 1
 BLOCKSIZE = int(0.05 * SAMPLE_RATE)
@@ -106,13 +109,16 @@ def fetch_full_customer_profile(_customers_sheet, _products_sheet, _interactions
         interactions_data = _interactions_sheet.get_all_records()
         customer_interactions = [i for i in interactions_data if i.get('Customer_ID') == customer_id]
         products_data = _products_sheet.get_all_records()
+        # Create a dictionary for O(1) lookups instead of O(n) searches
+        products_dict = {p.get('Product_ID'): p for p in products_data}
+
         full_interaction_history, purchase_history_summary = [], []
         for interaction in customer_interactions:
             product_id_string = interaction.get('Product_Purchased')
             if product_id_string and product_id_string != "(none)":
                 product_ids = [pid.strip() for pid in str(product_id_string).split(',')]
                 for product_id in product_ids:
-                    product_details = next((p for p in products_data if p.get('Product_ID') == product_id), {})
+                    product_details = products_dict.get(product_id, {})
                     if interaction.get('Outcome') == 'Sale Closed':
                         purchase_history_summary.append(product_details.get('Product_Name', 'Unknown Product'))
             full_interaction_history.append({
@@ -160,9 +166,15 @@ def get_live_call_suggestions(customer_profile, conversation_history, latest_tra
     2. "product_recommendation": If the conversation suggests an opportunity to upsell or cross-sell, recommend a specific product and a brief reason. If not, this must be an empty string.
     3. "next_step_suggestion": Suggest the EXACT next question the salesperson should ask or a phrase to handle a potential objection. This must be actionable and conversational.
     """
+    # ... inside get_live_call_suggestions
     try:
         response = gemini_client.generate_content(prompt)
-        return json.loads(response.text)
+        try:
+            # Attempt to parse the JSON response
+            return json.loads(response.text)
+        except json.JSONDecodeError:
+            # Handle cases where the LLM output is not valid JSON
+            return {"error": "AI returned an invalid format. Could not parse suggestions."}
     except Exception as e:
         return {"error": f"Gemini API Error: {e}"}
 
@@ -174,11 +186,76 @@ def perform_final_analysis_and_log(sheet_to_log, customer_profile, full_transcri
         return
     text_generator = genai.GenerativeModel('models/gemini-flash-latest')
     prompt = f"""
-    You are an expert sales analyst. Provide a comprehensive, post-call summary.
-    **CUSTOMER PROFILE:** {json.dumps(customer_profile, indent=2)}
-    **FULL CALL TRANSCRIPT:** "{full_transcript}"
-    **YOUR TASK:** Summarize the call, covering: overall sentiment, key topics, objections, upsell opportunities, and a recommended next step.
-    """
+You are a world-class sales analyst AI. Your task is to generate a highly detailed and structured post-call analysis report.
+**You must adhere strictly to the format and structure defined in the template below. Do not deviate.**
+
+**Use the following data:**
+- **CUSTOMER PROFILE:** {json.dumps(customer_profile, indent=2)}
+- **FULL CALL TRANSCRIPT:** "{full_transcript}"
+
+---
+
+**BEGIN TEMPLATE**
+
+# Post-Call Sales Analysis: [Populate with Customer Name] ([Populate with Customer ID])
+
+| Metric | Detail |
+| :--- | :--- |
+| **Customer ID/Name** | [Populate with Customer ID / Name (Industry)] |
+| **Sales Stage** | [Analyze the transcript and profile to determine the sales stage] |
+| **Call Duration** | [Analyze the transcript to determine the call's length (e.g., Brief, Standard, Extended)] |
+| **Product Focus** | [Analyze the transcript to identify the main product or service discussed] |
+| **Analyst Recommendation** | [Based on the entire call, provide a concise, actionable recommendation] |
+
+---
+
+## Call Overview
+[Generate a brief, 5-7 sentence high-level summary of the call's purpose, nature, and outcome here.]
+
+---
+
+## 1. Overall Sentiment
+[Provide a rating (e.g., Positive, Neutral, Neutral/Positive) followed by a paragraph explaining the reasoning based on the customer's tone and language.]
+
+---
+
+## 2. Key Topics Discussed
+| Topic | Detail | Analyst Note |
+| :--- | :--- | :--- |
+| [Identify the first key topic from the transcript] | [Detail what the customer said about this topic] | [Provide a strategic insight or note for the salesperson about this topic] |
+| [Identify the second key topic from the transcript] | [Detail what the customer said about this topic] | [Provide a strategic insight or note for the salesperson about this topic] |
+| [Identify the third key topic from the transcript] | [Detail what the customer said about this topic] | [Provide a strategic insight or note for the salesperson about this topic] |
+*(Note: Add more rows if other substantive topics were covered, otherwise remove this note.)*
+
+---
+
+## 3. Objections Raised
+[State "None." if no objections were raised. Follow with an explanation on why, based on the customer's clear requirements. If objections were raised, list them here.]
+
+---
+
+## 4. Upsell and Cross-sell Opportunities
+[Write a brief introductory sentence about the opportunities presented in the call.]
+
+| Opportunity | Strategy | Rationale |
+| :--- | :--- | :--- |
+| **Immediate Cross-sell:** [Identify the most immediate opportunity] | [Describe the specific strategy to capitalize on it now] | [Explain the business rationale for this strategy] |
+| **Strategic Upsell:** [Identify a logical long-term upsell] | [Describe a future-focused strategy] | [Explain how this capitalizes on the customer's stated needs] |
+| **Future Upsell:** [Identify a potential future opportunity] | [Describe a strategy for a subsequent interaction] | [Explain how this addresses a known customer pain point or history] |
+
+---
+
+## 5. Recommended Next Step
+[Write a brief introductory sentence that summarizes the immediate priority.]
+
+**Action 1 (Immediate):** [Describe the most urgent next step the salesperson must take, such as preparing a specific quote or bundle.]
+
+**Action 2 (Follow-Up Strategy):** [Describe the action to be taken in the follow-up communication, such as introducing a service plan.]
+
+**Action 3 (CRM Update):** [Describe the specific note or flag that should be added to the customer's file for future interactions.]
+
+**END TEMPLATE**
+"""
     try:
         response = text_generator.generate_content(prompt)
         summary = response.text.strip()
@@ -219,29 +296,59 @@ if "is_running" not in st.session_state:
     st.session_state.recommended_products = set()
 
 def audio_processing_worker(audio_q, result_q, stop_ev, customer_profile, conversation_history):
+    # <<< CHANGE: Initialize buffer for overlapping audio and calculate overlap in frames
+    overlap_buffer = None
+    OVERLAP_FRAMES = int(OVERLAP_DURATION * SAMPLE_RATE)
+    
     speech_buffer, block_counter = [], 0
     while not stop_ev.is_set():
         try:
             audio_data = audio_q.get(timeout=0.1)
             speech_buffer.append(audio_data)
             block_counter += 1
+            
             if block_counter >= MAX_BLOCKS_PER_CHUNK:
                 current_chunk_audio = np.concatenate(speech_buffer)
+
+                # <<< CHANGE: Prepend the previous overlap buffer to the current chunk
+                if overlap_buffer is not None:
+                    audio_to_process = np.concatenate([overlap_buffer, current_chunk_audio])
+                else:
+                    audio_to_process = current_chunk_audio
+
+                # <<< CHANGE: Update the overlap buffer for the *next* iteration
+                overlap_buffer = current_chunk_audio[-OVERLAP_FRAMES:]
+                
+                # Reset buffer for the next 10-second collection
                 speech_buffer, block_counter = [], 0
-                tmpfile_name = ""
+                
+                # <<< CHANGE: Process audio entirely in-memory, avoiding temp files
                 try:
-                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmpfile:
-                        tmpfile_name = tmpfile.name; sf.write(tmpfile, current_chunk_audio, SAMPLE_RATE)
-                    with open(tmpfile_name, "rb") as audio_file:
-                        transcript = groq_client.audio.transcriptions.create(file=audio_file, model="whisper-large-v3", response_format="text")
+                    # Create an in-memory binary stream
+                    mem_file = io.BytesIO()
+                    # Write audio data to the in-memory file as a WAV
+                    sf.write(mem_file, audio_to_process, SAMPLE_RATE, format='WAV')
+                    # Rewind the "file" to the beginning so the API can read it
+                    mem_file.seek(0)
+                    # Some APIs require a name attribute, so we add one.
+                    mem_file.name = 'live_audio.wav'
+
+                    transcript = groq_client.audio.transcriptions.create(
+                        file=mem_file,  # Pass the in-memory file object
+                        model="whisper-large-v3",
+                        response_format="text"
+                    )
+
                     if transcript and transcript.strip():
                         suggestions = get_live_call_suggestions(customer_profile, conversation_history, transcript)
                         result_q.put({"type": "chunk", "transcript": transcript, "suggestions": suggestions, "timestamp": datetime.now().strftime("%H:%M:%S")})
+                
                 except Exception as e:
                     result_q.put({"type": "error", "message": f"Processing Error: {e}"})
-                finally:
-                    if os.path.exists(tmpfile_name): os.remove(tmpfile_name)
-        except queue.Empty: continue
+                # <<< CHANGE: The 'finally' block for deleting the file is no longer needed
+
+        except queue.Empty:
+            continue
 
 # --- UI (No changes here) ---
 with st.sidebar:
@@ -297,7 +404,7 @@ with cols[1]:
         st.rerun()
 
 st.header("Live Call Dashboard")
-st.subheader(f"Live Co-Pilot Feed")
+st.subheader(f"Live Co-Pilot Feed {'(Listening...)' if st.session_state.is_running else '(Not Active)'}")
 st.text_area("Live Feed", value=st.session_state.live_chunks_display, height=300, key="live_feed")
 st.header("Post-Call Analysis")
 st.subheader("Products Recommended During Call")
